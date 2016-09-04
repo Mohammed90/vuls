@@ -50,6 +50,7 @@ Vulsは上に挙げた手動運用での課題を解決するツールであり�
     - CIDRを指定してサーバを自動検出、設定ファイルのテンプレートを生成
 - EmailやSlackで通知可能（日本語でのレポートも可能）
 - 付属するTerminal-Based User Interfaceビューアでは、Vim風キーバインドでスキャン結果を参照可能
+- Web UI([VulsRepo](https://github.com/usiusi360/vulsrepo))を使えばピボットテーブルのように分析可能
 
 ----
 
@@ -65,7 +66,8 @@ Vulsのセットアップは以下の３パターンがある
 
 -  Dockerコンテナ上にセットアップ  
 Docker Composeを用いて少ないコマンドでセットアップ可能  
-see https://github.com/future-architect/vuls/tree/master/setup/docker
+see https://github.com/future-architect/vuls/tree/master/setup/docker  
+[日本語README](https://github.com/future-architect/vuls/blob/master/setup/docker/README.ja.md)  
 - Chefでセットアップ  
 see https://github.com/sadayuki-matsuno/vuls-cookbook
 - 手動でセットアップ  
@@ -87,6 +89,7 @@ Hello Vulsチュートリアルでは手動でのセットアップ方法で説�
 1. Prepare
 1. Scan
 1. TUI(Terminal-Based User Interface)で結果を参照する
+1. Web UI([VulsRepo](https://github.com/usiusi360/vulsrepo))で結果を参照する
 
 ## Step1. Launch Amazon Linux
 
@@ -110,6 +113,9 @@ $ ssh-keygen -t rsa
 $ cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
 $ chmod 600 ~/.ssh/authorized_keys
 ```
+
+VulsはSSHパスワード認証をサポートしていない。SSH公開鍵鍵認証を使う必要がある。
+また、パスワードありのSUDOもセキュリティ上の理由によりサポートしていないため、スキャン対象サーバに/etc/sudoersにNOPASSWDを設定して、パスワードなしでSUDO可能にする必要がある。
 
 ## Step3. Install requirements
 
@@ -152,6 +158,14 @@ $ sudo chmod 700 /var/log/vuls
 $ go get github.com/kotakanbe/go-cve-dictionary
 ```
 
+go-cve-dictionaryを既にインストール済みでupdateしたい場合は
+
+```bash
+$ go get -u github.com/kotakanbe/go-cve-dictionary
+```
+
+で可能である。
+
 go getでエラーが発生した場合は、以下の点を確認する。
 - Gitのバージョンがv2以降か？
 - Go依存パッケージの問題でgo getに失敗する場合は [deploying with glide](https://github.com/future-architect/vuls/blob/master/README.md#deploy-with-glide) を試す。
@@ -175,13 +189,22 @@ go get
 $ go get github.com/future-architect/vuls
 ```
 
+vulsを既にインストール済みでupdateしたい場合は
+
+```bash
+$ go get -u github.com/future-architect/vuls
+```
+
+で可能である。
+
 go getでエラーが発生した場合は、以下の点を確認する。
 - Gitのバージョンがv2以降か？
 - Go依存パッケージの問題でgo getに失敗する場合は [deploying with glide](https://github.com/future-architect/vuls/blob/master/README.md#deploy-with-glide) を試す。
 
 ## Step6. Config
 
-Vulの設定ファイルを作成する（TOMLフォーマット）
+Vulsの設定ファイルを作成する（TOMLフォーマット）
+設定ファイルのチェックを行う
 
 ```
 $ cat config.toml
@@ -192,6 +215,8 @@ host         = "172.31.4.82"
 port        = "22"
 user        = "ec2-user"
 keyPath     = "/home/ec2-user/.ssh/id_rsa"
+
+$ vuls configtest
 ```
 
 ## Step7. Setting up target servers for Vuls  
@@ -248,6 +273,11 @@ $ vuls tui
 
 ![Vuls-TUI](img/hello-vuls-tui.png)
 
+## Step10. Web UI
+
+[VulsRepo](https://github.com/usiusi360/vulsrepo)はスキャン結果をビボットテーブルのように分析可能にするWeb UIである。  
+[Online Demo](http://usiusi360.github.io/vulsrepo/)があるので試してみて。
+
 ----
 
 # Architecture
@@ -266,6 +296,27 @@ $ vuls tui
 - スキャン結果の詳細情報はターミナル上で参照可能
 
 ![Vuls-Scan-Flow](img/vuls-scan-flow.png)
+
+----
+# Performance Considerations
+
+- Ubuntu, Debian  
+アップデート対象のパッケージが沢山ある場合は、毎回apt-get changelogするので遅いし、スキャン対象サーバのリソースを消費する。
+
+- CentOS  
+アップデート対象すべてのchangelogを一度で取得しパースする。スキャンスピードは高速、サーバリソース消費量は小さい。
+
+- Amazon, RHEL and FreeBSD  
+高速にスキャンし、スキャン対象サーバのリソース消費量は小さい。
+
+| Distribution|         Scan Speed | Resource Usage On Target Server |
+|:------------|:-------------------|:-------------|
+| Ubuntu      |               Slow | Heavy            |
+| Debian      |               Slow | Heavy            |
+| CentOS      |               Fast | Light            |
+| Amazon      |               Fast | Light            |
+| RHEL        |               Fast | Light            |
+| FreeBSD     |               Fast | Light            |
 
 ----
 
@@ -335,6 +386,13 @@ subjectPrefix = "[vuls]"
 #port        = "22"
 #user        = "username"
 #keyPath     = "/home/username/.ssh/id_rsa"
+#cpeNames = [
+#  "cpe:/a:rubyonrails:ruby_on_rails:4.2.1",
+#]
+#containers = ["${running}"]
+#optional = [
+#    ["key", "value"],
+#]
 
 [servers]
 
@@ -347,9 +405,12 @@ host         = "172.31.4.82"
 #  "cpe:/a:rubyonrails:ruby_on_rails:4.2.1",
 #]
 #containers = ["${running}"]
+#optional = [
+#    ["key", "value"],
+#]
 ```
 
-このテンプレート使ってVulsの設定フィアルを作ってもよい。
+このテンプレート使ってVulsの設定ファイルを作ってもよい。
 
 ----
 
@@ -413,6 +474,9 @@ host         = "172.31.4.82"
     #  "cpe:/a:rubyonrails:ruby_on_rails:4.2.1",
     #]
     #containers = ["${running}"]
+    #optional = [
+    #    ["key", "value"],
+    #]
     ```
     下記serversセクションで値が指定されなかった場合のデフォルト値
 
@@ -429,18 +493,69 @@ host         = "172.31.4.82"
     #  "cpe:/a:rubyonrails:ruby_on_rails:4.2.1",
     #]
     #containers = ["${running}"]
+    #optional = [
+    #    ["key", "value"],
+    #]
     ```
 
     serversセクションの値は、defaultセクションの値よりも優先される。
     defaultセクションの値を使いたい場合は `#` でコメントアウトする。
 
+    - host: IP address or hostname of target server
+    - port: SSH Port number
+    - user: SSH username
+    - keyPath: SSH private key path
+    - cpeNames: see [Usage: Scan vulnerability of non-OS package](https://github.com/future-architect/vuls/blob/master/README.ja.md#usage-scan-vulnerability-of-non-os-package)
+    - containers: see [Usage: Scan Docker containers](https://github.com/future-architect/vuls/blob/master/README.ja.md#usage-scan-docker-containers)
+    - optional: JSONレポートに含めたい追加情報
+
+
     Vulsは各サーバにSSHで接続するが、Goのネイティブ実装と、OSコマンドの２種類のSSH接続方法をサポートしている。
-    詳細は [-ssh-external option](https://github.com/future-architect/vuls#-ssh-external-option) を参照。
+    詳細は [-ssh-external option](https://github.com/future-architect/vuls/blob/master/README.ja.md#-ssh-external-option) を参照。
     
     また、以下のSSH認証をサポートしている。
     - SSH agent
     - SSH public key authentication (with password, empty password)
-    - Password authentication
+    SSH Password認証はサポートしていない
+
+----
+
+# Usage: Configtest 
+
+configtestサブコマンドは、config.tomlで定義されたサーバ/コンテナに対してSSH可能かどうかをチェックする。  
+
+```
+$ vuls configtest --help
+configtest:
+        configtest
+                        [-config=/path/to/config.toml]
+                        [-ask-key-password]
+                        [-ssh-external]
+                        [-debug]
+
+                        [SERVER]...
+  -ask-key-password
+        Ask ssh privatekey password before scanning
+  -config string
+        /path/to/toml (default "/Users/kotakanbe/go/src/github.com/future-architect/vuls/config.toml")
+  -debug
+        debug mode
+  -ssh-external
+        Use external ssh command. Default: Use the Go native implementation
+```
+
+また、スキャン対象サーバに対してパスワードなしでSUDO可能な状態かもチェックする。  
+
+スキャン対象サーバ上の`/etc/sudoers`のサンプル
+
+- CentOS, RHEL, Amazon Linux
+```
+vuls ALL=(root) NOPASSWD: /usr/bin/yum, /bin/echo
+```
+- Ubuntu, Debian
+```
+vuls ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt-cache
+```
 
 
 ----
@@ -453,8 +568,8 @@ Prepareサブコマンドは、Vuls内部で利用する以下のパッケージ
 |:------------|-------------------:|:-------------|
 | Ubuntu      |          12, 14, 16| -            |
 | Debian      |                7, 8| aptitude     |
-| CentOS      |                   5| yum-plugin-security, yum-changelog |
-| CentOS      |                6, 7| yum-plugin-security, yum-plugin-changelog |
+| CentOS      |                   5| yum-changelog |
+| CentOS      |                6, 7| yum-plugin-changelog |
 | Amazon      |                All | -            |
 | RHEL        |         4, 5, 6, 7 | -            |
 | FreeBSD     |                 10 | -            |
@@ -464,19 +579,15 @@ Prepareサブコマンドは、Vuls内部で利用する以下のパッケージ
 $ vuls prepare -help
 prepare
                         [-config=/path/to/config.toml] [-debug]
-                        [-ask-sudo-password]
                         [-ask-key-password]
+                        [SERVER]...
 
   -ask-key-password
         Ask ssh privatekey password before scanning
-  -ask-sudo-password
-        Ask sudo password of target servers before scanning
   -config string
         /path/to/toml (default "$PWD/config.toml")
   -debug
         debug mode
-  -use-unattended-upgrades
-        [Deprecated] For Ubuntu, install unattended-upgrades
 ```
 
 ----
@@ -496,33 +607,43 @@ scan:
                 [-cvss-over=7]
                 [-ignore-unscored-cves]
                 [-ssh-external]
+                [-report-azure-blob]
                 [-report-json]
                 [-report-mail]
                 [-report-s3]
                 [-report-slack]
                 [-report-text]
                 [-http-proxy=http://192.168.0.1:8080]
-                [-ask-sudo-password]
                 [-ask-key-password]
                 [-debug]
                 [-debug-sql]
                 [-aws-profile=default]
                 [-aws-region=us-west-2]
                 [-aws-s3-bucket=bucket_name]
+                [-azure-account=accout]
+                [-azure-key=key]
+                [-azure-container=container]
+                [SERVER]...
+
+
 
   -ask-key-password
         Ask ssh privatekey password before scanning
-  -ask-sudo-password
-        Ask sudo password of target servers before scanning
   -aws-profile string
         AWS Profile to use (default "default")
   -aws-region string
         AWS Region to use (default "us-east-1")
   -aws-s3-bucket string
         S3 bucket name
+  -azure-account string
+        Azure account name to use. AZURE_STORAGE_ACCOUNT environment variable is used if not specified
+  -azure-container string
+        Azure storage container name
+  -azure-key string
+        Azure account key to use. AZURE_STORAGE_ACCESS_KEY environment variable is used if not specified
   -config string
         /path/to/toml (default "$PWD/config.toml")
-  --cve-dictionary-dbpath string
+  -cve-dictionary-dbpath string
         /path/to/sqlite3 (For get cve detail from cve.sqlite3)        
   -cve-dictionary-url string
         http://CVE.Dictionary (default "http://127.0.0.1:1323")
@@ -552,11 +673,6 @@ scan:
         Write report to text files ($PWD/results/current)
   -ssh-external
         Use external ssh command. Default: Use the Go native implementation
-  -use-unattended-upgrades
-        [Deprecated] For Ubuntu. Scan by unattended-upgrades or not (use apt-get upgrade --dry-run by default)
-  -use-yum-plugin-security
-        [Deprecated] For CentOS 5. Scan by yum-plugin-security or not (use yum check-update by default)
-
 ```
 
 ## -ssh-external option
@@ -567,7 +683,11 @@ Vulsは２種類のSSH接続方法をサポートしている。
 これは、SSHコマンドがインストールされていない環境でも動作する（Windowsなど）  
 
 外部SSHコマンドを使ってスキャンするためには、`-ssh-external`を指定する。
-SSH Configが使えるので、ProxyCommandを使った多段SSHなどが可能。
+SSH Configが使えるので、ProxyCommandを使った多段SSHなどが可能。  
+CentOSでは、スキャン対象サーバの/etc/sudoersに以下を追加する必要がある(user: vuls)
+```
+Defaults:vuls !requiretty
+```
 
 ## -ask-key-password option 
 
@@ -576,41 +696,29 @@ SSH Configが使えるので、ProxyCommandを使った多段SSHなどが可能�
 | empty password   |                 -  | |
 | with password    |           required | or use ssh-agent |
 
-## -ask-sudo-password option
-
-| sudo password on target servers | -ask-sudo-password | |
-|:-----------------|:-------|:------|
-| NOPASSWORD       | - | defined as NOPASSWORD in /etc/sudoers on target servers |
-| with password    | required |  |
-
-
 ## -report-json , -report-text option
 
 結果をファイルに出力したい場合に指定する。出力先は、`$PWD/result/current/`    
 `all.(json|txt)`には、全サーバのスキャン結果が出力される。  
 `servername.(json|txt)`には、サーバごとのスキャン結果が出力される。
 
-## example
-
-### Scan all servers defined in config file
+## Example: Scan all servers defined in config file
 ```
 $ vuls scan \
-      --report-slack \ 
-      --report-mail \
-      --cvss-over=7 \
-      -ask-sudo-password \ 
+      -report-slack \ 
+      -report-mail \
+      -cvss-over=7 \
       -ask-key-password \
       -cve-dictionary-dbpath=$PWD/cve.sqlite3
 ```
 この例では、
-- スキャン対象サーバのsudoパスワードを指定
 - SSH公開鍵認証（秘密鍵パスフレーズ）を指定
 - configに定義された全サーバをスキャン
 - レポートをslack, emailに送信
 - CVSSスコアが 7.0 以上の脆弱性のみレポート
 - go-cve-dictionaryにはHTTPではなくDBに直接アクセス（go-cve-dictionaryをサーバモードで起動しない）
 
-### Scan specific servers
+## Example: Scan specific servers
 ```
 $ vuls scan \
       -cve-dictionary-dbpath=$PWD/cve.sqlite3 \ 
@@ -621,8 +729,7 @@ $ vuls scan \
 - ノーパスワードでsudoが実行可能
 - configで定義されているサーバの中の、server1, server2のみスキャン
 
-### Put results in S3 bucket
-レポートをS3バケットに格納する方法
+## Example: Put results in S3 bucket
 
 事前にAWS関連の設定を行う
 - S3バケットを作成 [Creating a Bucket](http://docs.aws.amazon.com/AmazonS3/latest/UG/CreatingaBucket.html)
@@ -632,18 +739,89 @@ $ vuls scan \
 ```
 $ vuls scan \
       -cve-dictionary-dbpath=$PWD/cve.sqlite3 \ 
+      -report-s3
       -aws-region=ap-northeast-1 \
       -aws-s3-bucket=vuls \
       -aws-profile=default 
 ```
 この例では、
 - SSH公開鍵認証（秘密鍵パスフレーズなし）
-- ノーパスワードでsudoが実行可能
 - configに定義された全サーバをスキャン
 - 結果をJSON形式でS3に格納する。
   - バケット名 ... vuls
   - リージョン ... ap-northeast-1
   - 利用するProfile ... default
+
+## Example: Put results in Azure Blob storage
+
+事前にAzure Blob関連の設定を行う
+- Containerを作成
+
+```
+$ vuls scan \
+      -cve-dictionary-dbpath=$PWD/cve.sqlite3 \ 
+      -report-azure-blob \
+      -azure-container=vuls \
+      -azure-account=test \
+      -azure-key=access-key-string 
+```
+この例では、
+- SSH公開鍵認証（秘密鍵パスフレーズなし）
+- configに定義された全サーバをスキャン
+- 結果をJSON形式でAzure Blobに格納する。
+  - コンテナ名 ... vuls
+  - ストレージアカウント名 ... test
+  - アクセスキー ... access-key-string
+
+また、アカウント名とアクセスキーは環境変数でも定義が可能
+```
+$ export AZURE_STORAGE_ACCOUNT=test
+$ export AZURE_STORAGE_ACCESS_KEY=access-key-string
+$ vuls scan \
+      -cve-dictionary-dbpath=$PWD/cve.sqlite3 \ 
+      -report-azure-blob \
+      -azure-container=vuls
+```
+
+## Example: Add optional key-value pairs to JSON
+
+追加情報をJSONに含めることができる。  
+デフォルトセクションのkey-valueはserversセクションのもので上書きされる。  
+使い方の例として、AzureリソースグループやVM名を指定しておくことで、結果のJSONをスクリプトでパースしてAzure VMの操作をする、などが可能。
+
+- config.toml
+```toml
+[default]
+optional = [
+	["key1", "default_value"],
+	["key3", "val3"],
+]
+
+[servers.bsd]
+host     = "192.168.11.11"
+user     = "kanbe"
+optional = [
+	["key1", "val1"],
+	["key2", "val2"],
+]
+```
+
+- bsd.json
+```json
+[
+  {
+    "ServerName": "bsd",
+    "Family": "FreeBSD",
+    "Release": "10.3-RELEASE",
+    .... snip ...
+    "Optional": [
+      [  "key1", "val1" ],
+      [  "key2", "val2" ],
+      [  "key3", "val3" ]
+    ]
+  }
+]
+```
 
 ----
 
@@ -853,6 +1031,26 @@ $ go-cve-dictionary fetchnvd -last2y
 Cronなどのジョブスケジューラを用いて実現可能。  
 -week オプションを指定して夜間の日次実行を推奨。
 
+- 注意
+NVDとJVNの両方の情報を取得する場合、NVDからの情報を取得した後でJVNの情報を取得することを勧める
+2016年7月現在で、
+
+    ```
+    $ go-cve-dictionary fetchnvd -years 2002 2003 2004 2005 2006 2007 2008 2009 2010 2011 2012 2013 2014 2015 2016 
+
+    $ go-cve-dictionary fetchjvn -entire 
+    ```
+
+の順でやった場合、最初のコマンドが15分程度、二つ目のコマンドが70分程度で、トータルでも1時間半程度で終わる(環境依存)が、
+
+    ```
+    $ go-cve-dictionary fetchjvn -entire 
+
+    $ nohup go-cve-dictionary fetchnvd -years 2002 2003 2004 2005 2006 2007 2008 2009 2010 2011 2012 2013 2014 2015 2016 &
+    ```
+
+の順で行うと、最初のコマンドは1時間くらいで終わるが二つ目のコマンドが21時間かかることもある(環境依存)。
+時間がかかりそうな時は上記のようにnohupして進捗を確認するようにした方が精神衛生的にも良い。
 
 ## スキャン実行
 
@@ -927,6 +1125,10 @@ CRONなどを使えば可能
 CRONなどを使い、自動化のためにsudoと、秘密鍵のパスワードなしでも実行可能なようにする
   - スキャン対象サーバの /etc/sudoers に NOPASSWORD を設定する  
   - 秘密鍵パスフレーズなしの公開鍵認証か、ssh-agentを使う  
+
+- スキャンが重く感じる
+vulsのスキャン対象に脆弱性が溜まりすぎると実行時間が長くなります
+脆弱性のある状態は溜めすぎないようにしましょう
 
 - クロスコンパイル
     ```bash

@@ -45,21 +45,18 @@ func newDebian(c config.ServerInfo) *debian {
 // Ubuntu, Debian
 // https://github.com/serverspec/specinfra/blob/master/lib/specinfra/helper/detect_os/debian.rb
 func detectDebian(c config.ServerInfo) (itsMe bool, deb osTypeInterface, err error) {
-
 	deb = newDebian(c)
-
-	// set sudo option flag
-	c.SudoOpt = config.SudoOption{ExecBySudo: true}
 	deb.setServerInfo(c)
 
 	if r := sshExec(c, "ls /etc/debian_version", noSudo); !r.isSuccess() {
+		if r.Error != nil {
+			return false, deb, r.Error
+		}
 		if r.ExitStatus == 255 {
 			return false, deb, fmt.Errorf(
-				"Unable to connect via SSH. Check SSH settings. servername: %s, %s@%s:%s, status: %d, stdout: %s, stderr: %s",
-				c.ServerName, c.User, c.Host, c.Port, r.ExitStatus, r.Stdout, r.Stderr,
-			)
+				"Unable to connect via SSH. Check SSH settings. %s", r)
 		}
-		Log.Debugf("Not Debian like Linux. Host: %s:%s", c.Host, c.Port)
+		Log.Debugf("Not Debian like Linux. %s", r)
 		return false, deb, nil
 	}
 
@@ -68,15 +65,13 @@ func detectDebian(c config.ServerInfo) (itsMe bool, deb osTypeInterface, err err
 		//  root@fa3ec524be43:/# lsb_release -ir
 		//  Distributor ID:	Ubuntu
 		//  Release:	14.04
-		re, _ := regexp.Compile(
-			`(?s)^Distributor ID:\s*(.+?)\n*Release:\s*(.+?)$`)
+		re := regexp.MustCompile(`(?s)^Distributor ID:\s*(.+?)\n*Release:\s*(.+?)$`)
 		result := re.FindStringSubmatch(trim(r.Stdout))
 
 		if len(result) == 0 {
 			deb.setDistributionInfo("debian/ubuntu", "unknown")
 			Log.Warnf(
-				"Unknown Debian/Ubuntu version. lsb_release -ir: %s, Host: %s:%s",
-				r.Stdout, c.Host, c.Port)
+				"Unknown Debian/Ubuntu version. lsb_release -ir: %s", r)
 		} else {
 			distro := strings.ToLower(trim(result[1]))
 			deb.setDistributionInfo(distro, trim(result[2]))
@@ -90,13 +85,11 @@ func detectDebian(c config.ServerInfo) (itsMe bool, deb osTypeInterface, err err
 		//  DISTRIB_RELEASE=14.04
 		//  DISTRIB_CODENAME=trusty
 		//  DISTRIB_DESCRIPTION="Ubuntu 14.04.2 LTS"
-		re, _ := regexp.Compile(
-			`(?s)^DISTRIB_ID=(.+?)\n*DISTRIB_RELEASE=(.+?)\n.*$`)
+		re := regexp.MustCompile(`(?s)^DISTRIB_ID=(.+?)\n*DISTRIB_RELEASE=(.+?)\n.*$`)
 		result := re.FindStringSubmatch(trim(r.Stdout))
 		if len(result) == 0 {
 			Log.Warnf(
-				"Unknown Debian/Ubuntu. cat /etc/lsb-release: %s, Host: %s:%s",
-				r.Stdout, c.Host, c.Port)
+				"Unknown Debian/Ubuntu. cat /etc/lsb-release: %s", r)
 			deb.setDistributionInfo("debian/ubuntu", "unknown")
 		} else {
 			distro := strings.ToLower(trim(result[1]))
@@ -112,7 +105,7 @@ func detectDebian(c config.ServerInfo) (itsMe bool, deb osTypeInterface, err err
 		return true, deb, nil
 	}
 
-	Log.Debugf("Not Debian like Linux. Host: %s:%s", c.Host, c.Port)
+	Log.Debugf("Not Debian like Linux: %s", c.ServerName)
 	return false, deb, nil
 }
 
@@ -120,14 +113,22 @@ func trim(str string) string {
 	return strings.TrimSpace(str)
 }
 
-func (o *debian) install() error {
+func (o *debian) checkIfSudoNoPasswd() error {
+	r := o.ssh("apt-get -v", sudo)
+	if !r.isSuccess() {
+		o.log.Errorf("sudo error on %s", r)
+		return fmt.Errorf("Failed to sudo: %s", r)
+	}
+	o.log.Infof("sudo ... OK")
+	return nil
+}
 
+func (o *debian) install() error {
 	// apt-get update
 	o.log.Infof("apt-get update...")
 	cmd := util.PrependProxyEnv("apt-get update")
 	if r := o.ssh(cmd, sudo); !r.isSuccess() {
-		msg := fmt.Sprintf("Failed to %s. status: %d, stdout: %s, stderr: %s",
-			cmd, r.ExitStatus, r.Stdout, r.Stderr)
+		msg := fmt.Sprintf("Failed to SSH: %s", r)
 		o.log.Errorf(msg)
 		return fmt.Errorf(msg)
 	}
@@ -136,35 +137,12 @@ func (o *debian) install() error {
 		// install aptitude
 		cmd = util.PrependProxyEnv("apt-get install --force-yes -y aptitude")
 		if r := o.ssh(cmd, sudo); !r.isSuccess() {
-			msg := fmt.Sprintf("Failed to %s. status: %d, stdout: %s, stderr: %s",
-				cmd, r.ExitStatus, r.Stdout, r.Stderr)
+			msg := fmt.Sprintf("Failed to SSH: %s", r)
 			o.log.Errorf(msg)
 			return fmt.Errorf(msg)
 		}
 		o.log.Infof("Installed: aptitude")
 	}
-
-	// install unattended-upgrades
-	if !config.Conf.UseUnattendedUpgrades {
-		return nil
-	}
-
-	if r := o.ssh("type unattended-upgrade", noSudo); r.isSuccess() {
-		o.log.Infof(
-			"Ignored: unattended-upgrade already installed")
-		return nil
-	}
-
-	cmd = util.PrependProxyEnv(
-		"apt-get install --force-yes -y unattended-upgrades")
-	if r := o.ssh(cmd, sudo); !r.isSuccess() {
-		msg := fmt.Sprintf("Failed to %s. status: %d, stdout: %s, stderr: %s",
-			cmd, r.ExitStatus, r.Stdout, r.Stderr)
-		o.log.Errorf(msg)
-		return fmt.Errorf(msg)
-	}
-
-	o.log.Infof("Installed: unattended-upgrades")
 	return nil
 }
 
@@ -189,9 +167,7 @@ func (o *debian) scanPackages() error {
 func (o *debian) scanInstalledPackages() (packs []models.PackageInfo, err error) {
 	r := o.ssh("dpkg-query -W", noSudo)
 	if !r.isSuccess() {
-		return packs, fmt.Errorf(
-			"Failed to scan packages. status: %d, stdout:%s, stderr: %s",
-			r.ExitStatus, r.Stdout, r.Stderr)
+		return packs, fmt.Errorf("Failed to SSH: %s", r)
 	}
 
 	//  e.g.
@@ -214,12 +190,16 @@ func (o *debian) scanInstalledPackages() (packs []models.PackageInfo, err error)
 	return
 }
 
+var packageLinePattern = regexp.MustCompile(`^([^\t']+)\t(.+)$`)
+
 func (o *debian) parseScannedPackagesLine(line string) (name, version string, err error) {
-	re, _ := regexp.Compile(`^([^\t']+)\t(.+)$`)
-	result := re.FindStringSubmatch(line)
+	result := packageLinePattern.FindStringSubmatch(line)
 	if len(result) == 3 {
 		// remove :amd64, i386...
-		name = regexp.MustCompile(":.+").ReplaceAllString(result[1], "")
+		name = result[1]
+		if i := strings.IndexRune(name, ':'); i >= 0 {
+			name = name[:i]
+		}
 		version = result[2]
 		return
 	}
@@ -227,25 +207,13 @@ func (o *debian) parseScannedPackagesLine(line string) (name, version string, er
 	return "", "", fmt.Errorf("Unknown format: %s", line)
 }
 
-//  unattended-upgrade command need to check security upgrades).
 func (o *debian) checkRequiredPackagesInstalled() error {
-
 	if o.Family == "debian" {
 		if r := o.ssh("test -f /usr/bin/aptitude", noSudo); !r.isSuccess() {
-			msg := "aptitude is not installed"
+			msg := fmt.Sprintf("aptitude is not installed: %s", r)
 			o.log.Errorf(msg)
 			return fmt.Errorf(msg)
 		}
-	}
-
-	if !config.Conf.UseUnattendedUpgrades {
-		return nil
-	}
-
-	if r := o.ssh("type unattended-upgrade", noSudo); !r.isSuccess() {
-		msg := "unattended-upgrade is not installed"
-		o.log.Errorf(msg)
-		return fmt.Errorf(msg)
 	}
 	return nil
 }
@@ -255,24 +223,12 @@ func (o *debian) scanUnsecurePackages(packs []models.PackageInfo) ([]CvePacksInf
 	//  cmd := prependProxyEnv(conf.HTTPProxy, "apt-get update | cat; echo 1")
 	cmd := util.PrependProxyEnv("apt-get update")
 	if r := o.ssh(cmd, sudo); !r.isSuccess() {
-		return nil, fmt.Errorf(
-			"Failed to %s. status: %d, stdout: %s, stderr: %s",
-			cmd, r.ExitStatus, r.Stdout, r.Stderr,
-		)
+		return nil, fmt.Errorf("Failed to SSH: %s", r)
 	}
 
-	var upgradablePackNames []string
-	var err error
-	if config.Conf.UseUnattendedUpgrades {
-		upgradablePackNames, err = o.GetUnsecurePackNamesUsingUnattendedUpgrades()
-		if err != nil {
-			return []CvePacksInfo{}, err
-		}
-	} else {
-		upgradablePackNames, err = o.GetUpgradablePackNames()
-		if err != nil {
-			return []CvePacksInfo{}, err
-		}
+	upgradablePackNames, err := o.GetUpgradablePackNames()
+	if err != nil {
+		return []CvePacksInfo{}, err
 	}
 
 	// Convert package name to PackageInfo struct
@@ -322,12 +278,10 @@ func (o *debian) fillCandidateVersion(packs []models.PackageInfo) ([]models.Pack
 			select {
 			case pack := <-reqChan:
 				func(p models.PackageInfo) {
-					cmd := fmt.Sprintf("apt-cache policy %s", p.Name)
+					cmd := fmt.Sprintf("LANG=en_US.UTF-8 apt-cache policy %s", p.Name)
 					r := o.ssh(cmd, sudo)
 					if !r.isSuccess() {
-						errChan <- fmt.Errorf(
-							"Failed to %s. status: %d, stdout: %s, stderr: %s",
-							cmd, r.ExitStatus, r.Stdout, r.Stderr)
+						errChan <- fmt.Errorf("Failed to SSH: %s.", r)
 						return
 					}
 					ver, err := o.parseAptCachePolicy(r.Stdout, p.Name)
@@ -361,44 +315,8 @@ func (o *debian) fillCandidateVersion(packs []models.PackageInfo) ([]models.Pack
 	return result, nil
 }
 
-func (o *debian) GetUnsecurePackNamesUsingUnattendedUpgrades() (packNames []string, err error) {
-	cmd := util.PrependProxyEnv("unattended-upgrades --dry-run -d 2>&1 ")
-	release, err := strconv.ParseFloat(o.Release, 64)
-	if err != nil {
-		return packNames, fmt.Errorf(
-			"OS Release Version is invalid, %s, %s", o.Family, o.Release)
-	}
-	switch {
-	case release < 12:
-		return packNames, fmt.Errorf(
-			"Support expired. %s, %s", o.Family, o.Release)
-
-	case 12 < release && release < 14:
-		cmd += `| grep 'pkgs that look like they should be upgraded:' |
-			sed -e 's/pkgs that look like they should be upgraded://g'`
-
-	case 14 < release:
-		cmd += `| grep 'Packages that will be upgraded:' |
-			sed -e 's/Packages that will be upgraded://g'`
-
-	default:
-		return packNames, fmt.Errorf(
-			"Not supported yet. %s, %s", o.Family, o.Release)
-	}
-
-	r := o.ssh(cmd, sudo)
-	if r.isSuccess(0, 1) {
-		packNames = strings.Split(strings.TrimSpace(r.Stdout), " ")
-		return packNames, nil
-	}
-
-	return packNames, fmt.Errorf(
-		"Failed to %s. status: %d, stdout: %s, stderr: %s",
-		cmd, r.ExitStatus, r.Stdout, r.Stderr)
-}
-
 func (o *debian) GetUpgradablePackNames() (packNames []string, err error) {
-	cmd := util.PrependProxyEnv("apt-get upgrade --dry-run")
+	cmd := util.PrependProxyEnv("LANG=en_US.UTF-8 apt-get upgrade --dry-run")
 	r := o.ssh(cmd, sudo)
 	if r.isSuccess(0, 1) {
 		return o.parseAptGetUpgrade(r.Stdout)
@@ -409,8 +327,8 @@ func (o *debian) GetUpgradablePackNames() (packNames []string, err error) {
 }
 
 func (o *debian) parseAptGetUpgrade(stdout string) (upgradableNames []string, err error) {
-	startRe, _ := regexp.Compile(`The following packages will be upgraded:`)
-	stopRe, _ := regexp.Compile(`^(\d+) upgraded.*`)
+	startRe := regexp.MustCompile(`The following packages will be upgraded:`)
+	stopRe := regexp.MustCompile(`^(\d+) upgraded.*`)
 	startLineFound, stopLineFound := false, false
 
 	lines := strings.Split(stdout, "\n")
@@ -473,7 +391,6 @@ func (o *debian) scanPackageCveInfos(unsecurePacks []models.PackageInfo) (cvePac
 	}()
 
 	timeout := time.After(30 * 60 * time.Second)
-
 	concurrency := 10
 	tasks := util.GenWorkers(concurrency)
 	for range unsecurePacks {
@@ -508,6 +425,7 @@ func (o *debian) scanPackageCveInfos(unsecurePacks []models.PackageInfo) (cvePac
 		case err := <-errChan:
 			errs = append(errs, err)
 		case <-timeout:
+			//TODO append to errs
 			return nil, fmt.Errorf("Timeout scanPackageCveIDs")
 		}
 	}
@@ -553,13 +471,12 @@ func (o *debian) scanPackageCveIDs(pack models.PackageInfo) ([]string, error) {
 
 	r := o.ssh(cmd, noSudo)
 	if !r.isSuccess() {
-		o.log.Warnf(
-			"Failed to %s. status: %d, stdout: %s, stderr: %s",
-			cmd, r.ExitStatus, r.Stdout, r.Stderr)
+		o.log.Warnf("Failed to SSH: %s", r)
 		// Ignore this Error.
 		return nil, nil
 
 	}
+	// No error will be returned. Only logging.
 	return o.getCveIDParsingChangelog(r.Stdout, pack.Name, pack.Version)
 }
 
@@ -586,7 +503,7 @@ func (o *debian) getCveIDParsingChangelog(changelog string,
 		return
 	}
 
-	//TODO report as unable to parse changelog.
+	// Only logging the error.
 	o.log.Error(err)
 	return []string{}, nil
 }
@@ -596,8 +513,8 @@ func (o *debian) getCveIDParsingChangelog(changelog string,
 func (o *debian) parseChangelog(changelog string,
 	packName string, versionOrLater string) (cveIDs []string, err error) {
 
-	cveRe, _ := regexp.Compile(`(CVE-\d{4}-\d{4})`)
-	stopRe, _ := regexp.Compile(fmt.Sprintf(`\(%s\)`, regexp.QuoteMeta(versionOrLater)))
+	cveRe := regexp.MustCompile(`(CVE-\d{4}-\d{4,})`)
+	stopRe := regexp.MustCompile(fmt.Sprintf(`\(%s\)`, regexp.QuoteMeta(versionOrLater)))
 	stopLineFound := false
 	lines := strings.Split(changelog, "\n")
 	for _, line := range lines {

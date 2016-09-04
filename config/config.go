@@ -54,10 +54,12 @@ type Config struct {
 	AwsRegion  string
 	S3Bucket   string
 
+	AzureAccount   string
+	AzureKey       string
+	AzureContainer string
+
 	//  CpeNames      []string
 	//  SummaryMode          bool
-	UseYumPluginSecurity  bool
-	UseUnattendedUpgrades bool
 }
 
 // Validate configuration
@@ -212,7 +214,6 @@ func (c *SlackConf) Validate() (errs []error) {
 type ServerInfo struct {
 	ServerName  string
 	User        string
-	Password    string
 	Host        string
 	Port        string
 	KeyPath     string
@@ -223,9 +224,11 @@ type ServerInfo struct {
 	// Container Names or IDs
 	Containers []string
 
+	// Optional key-value set that will be outputted to JSON
+	Optional [][]interface{}
+
 	// used internal
 	LogMsgAnsiColor string // DebugLog Color
-	SudoOpt         SudoOption
 	Container       Container
 	Family          string
 }
@@ -245,14 +248,4 @@ type Container struct {
 	ContainerID string
 	Name        string
 	Type        string
-}
-
-// SudoOption is flag of sudo option.
-type SudoOption struct {
-
-	// echo pass | sudo -S ls
-	ExecBySudo bool
-
-	// echo pass | sudo sh -C 'ls'
-	ExecBySudoSh bool
 }

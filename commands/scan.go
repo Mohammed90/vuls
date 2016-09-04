@@ -20,8 +20,10 @@ package commands
 import (
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Sirupsen/logrus"
 	c "github.com/future-architect/vuls/config"
@@ -49,24 +51,25 @@ type ScanCmd struct {
 	cvssScoreOver      float64
 	ignoreUnscoredCves bool
 
-	httpProxy string
-
-	// reporting
-	reportSlack bool
-	reportMail  bool
-	reportJSON  bool
-	reportText  bool
-	reportS3    bool
-
+	httpProxy       string
 	askSudoPassword bool
 	askKeyPassword  bool
 
-	useYumPluginSecurity  bool
-	useUnattendedUpgrades bool
+	// reporting
+	reportSlack     bool
+	reportMail      bool
+	reportJSON      bool
+	reportText      bool
+	reportS3        bool
+	reportAzureBlob bool
 
 	awsProfile  string
 	awsS3Bucket string
 	awsRegion   string
+
+	azureAccount   string
+	azureKey       string
+	azureContainer string
 
 	sshExternal bool
 }
@@ -81,7 +84,6 @@ func (*ScanCmd) Synopsis() string { return "Scan vulnerabilities" }
 func (*ScanCmd) Usage() string {
 	return `scan:
 	scan
-		[SERVER]...
 		[-lang=en|ja]
 		[-config=/path/to/config.toml]
 		[-dbpath=/path/to/vuls.sqlite3]
@@ -90,19 +92,24 @@ func (*ScanCmd) Usage() string {
 		[-cvss-over=7]
 		[-ignore-unscored-cves]
 		[-ssh-external]
+		[-report-azure-blob]
 		[-report-json]
 		[-report-mail]
 		[-report-s3]
 		[-report-slack]
 		[-report-text]
 		[-http-proxy=http://192.168.0.1:8080]
-		[-ask-sudo-password]
 		[-ask-key-password]
 		[-debug]
 		[-debug-sql]
 		[-aws-profile=default]
 		[-aws-region=us-west-2]
 		[-aws-s3-bucket=bucket_name]
+		[-azure-account=accout]
+		[-azure-key=key]
+		[-azure-container=container]
+
+		[SERVER]...
 `
 }
 
@@ -174,11 +181,20 @@ func (p *ScanCmd) SetFlags(f *flag.FlagSet) {
 	f.BoolVar(&p.reportS3,
 		"report-s3",
 		false,
-		"Write report to S3 (bucket/yyyyMMdd_HHmm)",
+		"Write report to S3 (bucket/yyyyMMdd_HHmm/servername.json)",
 	)
-	f.StringVar(&p.awsProfile, "aws-profile", "default", "AWS Profile to use")
-	f.StringVar(&p.awsRegion, "aws-region", "us-east-1", "AWS Region to use")
+	f.StringVar(&p.awsProfile, "aws-profile", "default", "AWS profile to use")
+	f.StringVar(&p.awsRegion, "aws-region", "us-east-1", "AWS region to use")
 	f.StringVar(&p.awsS3Bucket, "aws-s3-bucket", "", "S3 bucket name")
+
+	f.BoolVar(&p.reportAzureBlob,
+		"report-azure-blob",
+		false,
+		"Write report to S3 (container/yyyyMMdd_HHmm/servername.json)",
+	)
+	f.StringVar(&p.azureAccount, "azure-account", "", "Azure account name to use. AZURE_STORAGE_ACCOUNT environment variable is used if not specified")
+	f.StringVar(&p.azureKey, "azure-key", "", "Azure account key to use. AZURE_STORAGE_ACCESS_KEY environment variable is used if not specified")
+	f.StringVar(&p.azureContainer, "azure-container", "", "Azure storage container name")
 
 	f.BoolVar(
 		&p.askKeyPassword,
@@ -191,28 +207,13 @@ func (p *ScanCmd) SetFlags(f *flag.FlagSet) {
 		&p.askSudoPassword,
 		"ask-sudo-password",
 		false,
-		"Ask sudo password of target servers before scanning",
+		"[Deprecated] THIS OPTION WAS REMOVED FOR SECURITY REASONS. Define NOPASSWD in /etc/sudoers on tareget servers and use SSH key-based authentication",
 	)
-
-	f.BoolVar(
-		&p.useYumPluginSecurity,
-		"use-yum-plugin-security",
-		false,
-		"[Deprecated] For CentOS 5. Scan by yum-plugin-security or not (use yum check-update by default)",
-	)
-
-	f.BoolVar(
-		&p.useUnattendedUpgrades,
-		"use-unattended-upgrades",
-		false,
-		"[Deprecated] For Ubuntu. Scan by unattended-upgrades or not (use apt-get upgrade --dry-run by default)",
-	)
-
 }
 
 // Execute execute
 func (p *ScanCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) subcommands.ExitStatus {
-	var keyPass, sudoPass string
+	var keyPass string
 	var err error
 	if p.askKeyPassword {
 		prompt := "SSH key password: "
@@ -222,14 +223,11 @@ func (p *ScanCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) 
 		}
 	}
 	if p.askSudoPassword {
-		prompt := "sudo password: "
-		if sudoPass, err = getPasswd(prompt); err != nil {
-			logrus.Error(err)
-			return subcommands.ExitFailure
-		}
+		logrus.Errorf("[Deprecated] -ask-sudo-password WAS REMOVED FOR SECURITY REASONS. Define NOPASSWD in /etc/sudoers on tareget servers and use SSH key-based authentication")
+		return subcommands.ExitFailure
 	}
 
-	err = c.Load(p.configPath, keyPass, sudoPass)
+	err = c.Load(p.configPath, keyPass)
 	if err != nil {
 		logrus.Errorf("Error loading %s, %s", p.configPath, err)
 		return subcommands.ExitUsageError
@@ -242,8 +240,27 @@ func (p *ScanCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) 
 	} else {
 		logrus.Infof("cve-dictionary: %s", p.cveDictionaryURL)
 	}
+
+	var servernames []string
+	if 0 < len(f.Args()) {
+		servernames = f.Args()
+	} else {
+		stat, _ := os.Stdin.Stat()
+		if (stat.Mode() & os.ModeCharDevice) == 0 {
+			bytes, err := ioutil.ReadAll(os.Stdin)
+			if err != nil {
+				logrus.Errorf("Failed to read stdin: %s", err)
+				return subcommands.ExitFailure
+			}
+			fields := strings.Fields(string(bytes))
+			if 0 < len(fields) {
+				servernames = fields
+			}
+		}
+	}
+
 	target := make(map[string]c.ServerInfo)
-	for _, arg := range f.Args() {
+	for _, arg := range servernames {
 		found := false
 		for servername, info := range c.Conf.Servers {
 			if servername == arg {
@@ -257,7 +274,7 @@ func (p *ScanCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) 
 			return subcommands.ExitUsageError
 		}
 	}
-	if 0 < len(f.Args()) {
+	if 0 < len(servernames) {
 		c.Conf.Servers = target
 	}
 
@@ -296,6 +313,29 @@ func (p *ScanCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) 
 		}
 		reports = append(reports, report.S3Writer{})
 	}
+	if p.reportAzureBlob {
+		c.Conf.AzureAccount = p.azureAccount
+		if c.Conf.AzureAccount == "" {
+			c.Conf.AzureAccount = os.Getenv("AZURE_STORAGE_ACCOUNT")
+		}
+
+		c.Conf.AzureKey = p.azureKey
+		if c.Conf.AzureKey == "" {
+			c.Conf.AzureKey = os.Getenv("AZURE_STORAGE_ACCESS_KEY")
+		}
+
+		c.Conf.AzureContainer = p.azureContainer
+		if c.Conf.AzureContainer == "" {
+			Log.Error("Azure storage container name is requied with --azure-container option")
+			return subcommands.ExitUsageError
+		}
+		if err := report.CheckIfAzureContainerExists(); err != nil {
+			Log.Errorf("Failed to access to the Azure Blob container. err: %s", err)
+			Log.Error("Ensure the container or check Azure config before scanning")
+			return subcommands.ExitUsageError
+		}
+		reports = append(reports, report.AzureBlobWriter{})
+	}
 
 	c.Conf.DBPath = p.dbpath
 	c.Conf.CveDBPath = p.cvedbpath
@@ -304,8 +344,6 @@ func (p *ScanCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) 
 	c.Conf.IgnoreUnscoredCves = p.ignoreUnscoredCves
 	c.Conf.SSHExternal = p.sshExternal
 	c.Conf.HTTPProxy = p.httpProxy
-	c.Conf.UseYumPluginSecurity = p.useYumPluginSecurity
-	c.Conf.UseUnattendedUpgrades = p.useUnattendedUpgrades
 
 	Log.Info("Validating Config...")
 	if !c.Conf.Validate() {
@@ -318,12 +356,17 @@ func (p *ScanCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...interface{}) 
 		return subcommands.ExitFailure
 	}
 
-	Log.Info("Detecting Server OS... ")
-	err = scan.InitServers(Log)
-	if err != nil {
-		Log.Errorf("Failed to init servers. Check the configuration. err: %s", err)
+	Log.Info("Detecting Server/Contianer OS... ")
+	scan.InitServers(Log)
+
+	Log.Info("Checking sudo configuration... ")
+	if err := scan.CheckIfSudoNoPasswd(Log); err != nil {
+		Log.Errorf("Failed to sudo with nopassword via SSH. Define NOPASSWD in /etc/sudoers on target servers")
 		return subcommands.ExitFailure
 	}
+
+	Log.Info("Detecting Platforms... ")
+	scan.DetectPlatforms(Log)
 
 	Log.Info("Scanning vulnerabilities... ")
 	if errs := scan.Scan(); 0 < len(errs) {
